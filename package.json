@@ -5,7 +5,8 @@
   "main": "pdf-server.js",
   "scripts": {
     "start": "node pdf-server.js",
-    "dev": "node pdf-server.js"
+    "dev": "nodemon pdf-server.js",
+    "serve": "nodemon pdf-server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
@@ -14,5 +15,8 @@
   },
   "engines": {
     "node": ">=16.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
   }
 }
