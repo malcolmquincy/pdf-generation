@@ -22,6 +22,7 @@ app.post('/generate-pdf', async (req, res) => {
     
     try {
         const { url, filename = 'document.pdf' } = req.body;
+        const startTime = Date.now();
         
         console.log(`Starting PDF generation for: ${url}`);
         
@@ -33,20 +34,48 @@ app.post('/generate-pdf', async (req, res) => {
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-web-security',
-                '--disable-features=VizDisplayCompositor'
+                '--disable-features=VizDisplayCompositor',
+                '--disable-gpu',
+                '--disable-software-rasterizer'
             ],
-            timeout: 60000
+            timeout: 60000,
+            protocolTimeout: 240000
         });
 
         page = await browser.newPage();
         
         // Set longer timeouts and error handlers
-        page.setDefaultTimeout(60000);
-        page.setDefaultNavigationTimeout(60000);
+        page.setDefaultTimeout(120000);
+        page.setDefaultNavigationTimeout(120000);
         
         // Set viewport for consistent rendering
         await page.setViewport({ width: 1200, height: 800 });
         await page.emulateMediaType('screen');
+        
+        // Block unnecessary resources to speed up loading
+        await page.setRequestInterception(true);
+        page.on('request', (request) => {
+            const resourceType = request.resourceType();
+            const url = request.url();
+            
+            // Allow important resources for PDF content
+            if (url.includes('maps.googleapis.com') || url.includes('maps.gstatic.com')) {
+                // Allow Google Maps resources
+                request.continue();
+            } else if (resourceType === 'image') {
+                // Allow all images (hero images, property images, etc.)
+                request.continue();
+            } else if (resourceType === 'font') {
+                // Block fonts to speed up loading (PDF will use system fonts)
+                request.abort();
+            } else if (['media', 'websocket', 'manifest'].includes(resourceType)) {
+                // Block heavy multimedia resources
+                request.abort();
+            } else {
+                // Allow everything else (CSS, JS, etc.)
+                request.continue();
+            }
+        });
         
         // Navigate with retries
         let navigationSuccess = false;
@@ -57,22 +86,35 @@ app.post('/generate-pdf', async (req, res) => {
             attempts++;
             try {
                 await page.goto(url, { 
-                    waitUntil: 'networkidle2',
-                    timeout: 45000 
+                    waitUntil: 'domcontentloaded',
+                    timeout: 60000 
                 });
+                
+                // Wait for the page to be more fully loaded
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                
+                // Check if Google Maps is present and try to wait for it
+                const hasMap = await page.$('#propertyMap');
+                if (hasMap) {
+                    try {
+                        // Wait for map tiles to load (look for img elements in the map)
+                        await page.waitForSelector('#propertyMap img', { timeout: 10000 });
+                    } catch (mapError) {
+                        // Map images did not load within timeout, continuing...
+                    }
+                    
+                    // Additional wait for map rendering
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                }
+                
                 navigationSuccess = true;
-                console.log(`Navigation successful on attempt ${attempts}`);
             } catch (navError) {
-                console.log(`Navigation attempt ${attempts} failed: ${navError.message}`);
                 if (attempts === maxAttempts) {
                     throw new Error(`Failed to navigate after ${maxAttempts} attempts: ${navError.message}`);
                 }
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
         }
-
-        // Wait for content to load
-        await new Promise(resolve => setTimeout(resolve, 3000));
 
         // Inject optimized PDF CSS
         await page.addStyleTag({
@@ -223,27 +265,44 @@ app.post('/generate-pdf', async (req, res) => {
         await page.evaluate(() => {
             // Extract coordinates from interactive maps and replace with static maps
             const maps = document.querySelectorAll('.interactive-map');
-            maps.forEach(mapEl => {
+            
+            maps.forEach((mapEl, index) => {
                 const container = mapEl.closest('.property-map-container');
                 if (container) {
                     const staticImg = container.querySelector('.property-map-image');
                     if (staticImg) {
                         staticImg.style.display = 'block';
+                        staticImg.style.visibility = 'visible';
+                        mapEl.style.display = 'none';
+                    } else {
                         mapEl.style.display = 'none';
                     }
                 }
             });
+            
+            // Also handle any map loading indicators
+            const loadingElements = document.querySelectorAll('.map-loading');
+            loadingElements.forEach(el => el.style.display = 'none');
         });
 
-        // Wait for layout adjustments
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Wait for layout adjustments and ensure all content is ready
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        // Final check that the page content is fully rendered
+        await page.evaluate(() => {
+            return new Promise((resolve) => {
+                if (document.readyState === 'complete') {
+                    resolve();
+                } else {
+                    window.addEventListener('load', resolve);
+                }
+            });
+        });
         
         // Verify page is still active before PDF generation
         if (page.isClosed()) {
             throw new Error('Page was closed before PDF generation');
         }
-        
-        console.log('Starting PDF generation...');
         
         // Generate PDF with error handling
         let pdf;
@@ -260,8 +319,6 @@ app.post('/generate-pdf', async (req, res) => {
                 scale: 0.85,
                 timeout: 30000
             });
-            
-            console.log(`PDF generated successfully: ${pdf.length} bytes`);
         } catch (pdfError) {
             console.error('PDF generation failed:', pdfError.message);
             throw new Error(`PDF generation failed: ${pdfError.message}`);
@@ -271,6 +328,10 @@ app.post('/generate-pdf', async (req, res) => {
         if (!pdf || pdf.length === 0) {
             throw new Error('PDF generation produced empty result');
         }
+        
+        const endTime = Date.now();
+        const duration = ((endTime - startTime) / 1000).toFixed(2);
+        console.log(`PDF generated successfully: ${pdf.length} bytes in ${duration}s`);
         
         // Send response
         res.setHeader('Content-Type', 'application/pdf');
