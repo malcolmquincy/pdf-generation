@@ -36,7 +36,10 @@ app.post('/generate-pdf', async (req, res) => {
                 '--disable-web-security',
                 '--disable-features=VizDisplayCompositor',
                 '--disable-gpu',
-                '--disable-software-rasterizer'
+                '--disable-software-rasterizer',
+                '--font-render-hinting=none',
+                '--enable-font-antialiasing',
+                '--force-color-emoji-font'
             ],
             timeout: 60000,
             protocolTimeout: 240000
@@ -66,8 +69,19 @@ app.post('/generate-pdf', async (req, res) => {
                 // Allow all images (hero images, property images, etc.)
                 request.continue();
             } else if (resourceType === 'font') {
-                // Block fonts to speed up loading (PDF will use system fonts)
-                request.abort();
+                const fontUrl = request.url().toLowerCase();
+                // Allow emoji and essential fonts, block decorative fonts
+                if (fontUrl.includes('emoji') || 
+                    fontUrl.includes('noto') || 
+                    fontUrl.includes('segoe') || 
+                    fontUrl.includes('apple') ||
+                    fontUrl.includes('system') ||
+                    fontUrl.includes('icons.min.css')) {
+                    request.continue();
+                } else {
+                    // Block heavy decorative fonts to speed up loading
+                    request.abort();
+                }
             } else if (['media', 'websocket', 'manifest'].includes(resourceType)) {
                 // Block heavy multimedia resources
                 request.abort();
@@ -127,6 +141,15 @@ app.post('/generate-pdf', async (req, res) => {
                     background: white !important;
                     margin: 0 !important;
                     padding: 10px !important;
+                }
+                
+                /* Emoji font support for PDF generation */
+                .section-icon, .file-icon, .deal-location {
+                    font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', 'Android Emoji', 'EmojiSymbols', sans-serif !important;
+                    font-size: 24px !important;
+                    line-height: 1 !important;
+                    font-variant-emoji: emoji !important;
+                    text-rendering: auto !important;
                 }
                 
                 .sidebar, .advisor-message-form, .nav-menu, 
